@@ -14,6 +14,14 @@ from math import floor
 import re
 from requests.adapters import HTTPAdapter, Retry
 import warnings
+import pytz  # 추가: 시간대 처리를 위한 라이브러리
+
+# 한국 시간대 설정
+KST = pytz.timezone('Asia/Seoul')
+
+def get_korea_today():
+    """한국 시간 기준 오늘 날짜 반환"""
+    return datetime.now(KST).date()
 
 st.set_page_config(page_title="영산강보 지하수측정망 이상치 검색", layout="wide")
 
@@ -29,7 +37,7 @@ if 'df_results_filtered' not in st.session_state:
 if 'anomal_day' not in st.session_state:
     st.session_state.anomal_day = 7
 if 'recent_cut' not in st.session_state:
-    st.session_state.recent_cut = date.today() - timedelta(days=7)
+    st.session_state.recent_cut = get_korea_today() - timedelta(days=7)  # 수정
 if 'use_decomposition' not in st.session_state:
     st.session_state.use_decomposition = True
 if 'station_list' not in st.session_state:
@@ -303,7 +311,7 @@ if run_button:
 
         last_local_date = pd.to_datetime(df2["valuedatetimech"]).dt.date.max()
         from_date = last_local_date.isoformat()
-        to_date = date.today().isoformat()
+        to_date = get_korea_today().isoformat()  # 수정
 
         st.info(f"새 관측자료 수집 중... ({from_date} ~ {to_date})")
         progress_bar = st.progress(0)
@@ -355,8 +363,8 @@ if run_button:
         pbar = st.progress(0)
         tot = len(unique_sites)
 
-        # 최근 N일 기준 날짜 계산
-        recent_cut = date.today() - timedelta(days=anomal_day)
+        # 최근 N일 기준 날짜 계산 (한국 시간 기준)
+        recent_cut = get_korea_today() - timedelta(days=anomal_day)  # 수정
         st.session_state.recent_cut = recent_cut
         st.session_state.anomal_day = anomal_day
         st.session_state.use_decomposition = use_decomposition
@@ -644,7 +652,7 @@ if st.session_state.analysis_complete:
                 # 최근 N일 구간 강조
                 fig.add_vrect(
                     x0=recent_cut,
-                    x1=date.today(),
+                    x1=get_korea_today(),
                     fillcolor="rgba(255, 0, 0, 0.05)",
                     layer="below",
                     line_width=0,
@@ -814,6 +822,7 @@ elif not run_button:
     - ✅ 실시간 관측소 데이터 수집
     - ✅ 미수신 관측소 자동 감지
     - ✅ 시각화를 통한 이상치 확인
+    - ✅ **한국 시간대(KST) 기준** 날짜 처리
     
     ### 시계열 분해 (Time Decomposition)
     - **추세 (Trend)**: 장기적인 상승/하락 경향
