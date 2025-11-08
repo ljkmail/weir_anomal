@@ -19,6 +19,22 @@ st.set_page_config(page_title="영산강보 지하수측정망 이상치 검색"
 
 st.title("영산강보 지하수측정망 이상치 검색 서비스")
 
+# 세션 상태 초기화
+if 'analysis_complete' not in st.session_state:
+    st.session_state.analysis_complete = False
+if 'df2_anomal' not in st.session_state:
+    st.session_state.df2_anomal = {}
+if 'df_results_filtered' not in st.session_state:
+    st.session_state.df_results_filtered = pd.DataFrame()
+if 'anomal_day' not in st.session_state:
+    st.session_state.anomal_day = 7
+if 'recent_cut' not in st.session_state:
+    st.session_state.recent_cut = date.today() - timedelta(days=7)
+if 'use_decomposition' not in st.session_state:
+    st.session_state.use_decomposition = True
+if 'station_list' not in st.session_state:
+    st.session_state.station_list = []
+
 # --------------------------------------------------------------
 # Sidebar: 사용자 입력
 # --------------------------------------------------------------
@@ -256,6 +272,9 @@ def fetch_station_json(gennum, from_date, to_date, session=None):
 # 메인 실행
 # --------------------------------------------------------------
 if run_button:
+    # 분석 시작 시 세션 상태 초기화
+    st.session_state.analysis_complete = False
+    
     try:
         df2 = load_local_df2()
         date_col = detect_date_col(df2)
@@ -275,6 +294,7 @@ if run_button:
         url_weir = "http://www.gims.go.kr/odmUnderground?resultId=JSM-008&fromDate=2023-04-01&toDate=2023-04-03"
         try:
             station_list = crawl_station_list(url_weir)
+            st.session_state.station_list = station_list
         except Exception as e:
             st.error(f"관측소 목록 크롤링 실패: {e}")
             st.stop()
@@ -337,6 +357,9 @@ if run_button:
 
         # 최근 N일 기준 날짜 계산
         recent_cut = date.today() - timedelta(days=anomal_day)
+        st.session_state.recent_cut = recent_cut
+        st.session_state.anomal_day = anomal_day
+        st.session_state.use_decomposition = use_decomposition
 
         for idx, site in enumerate(unique_sites):
             pbar.progress((idx + 1) / tot)
@@ -453,316 +476,325 @@ if run_button:
             (df_results["이상상황"] == "미수신") | (df_results["recent_anomaly_flag"])
         ].sort_values("관측소명")
 
-        # -------------------------------
-        # 결과 요약 표시
-        # -------------------------------
-        st.subheader(f"🔎 최근 {anomal_day}일 내 이상치 / 미수신 관측소 요약")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("총 관측소 수", len(station_list))
-        with col2:
-            anomaly_count = df_results_filtered[df_results_filtered["이상상황"] == "수위자료확인필요"].shape[0]
-            st.metric("이상치 관측소", anomaly_count)
-        with col3:
-            missing_count = df_results_filtered[df_results_filtered["이상상황"] == "미수신"].shape[0]
-            st.metric("미수신 관측소", missing_count)
-
-        if df_results_filtered.empty:
-            st.success(f"✅ 최근 {anomal_day}일 내 이상치 또는 미수신 관측소가 없습니다.")
-        else:
-            # 결과 테이블 표시
-            display_cols = ["관측소명", "이상상황", "해발수위", "평균수위", "표준편차", "이상치개수", "최근이상치개수", "anomaly_dates"]
-            st.dataframe(
-                df_results_filtered[display_cols].reset_index(drop=True).style.format({
-                    "해발수위": "{:.2f}",
-                    "평균수위": "{:.2f}",
-                    "표준편차": "{:.2f}"
-                }, na_rep="-"),
-                use_container_width=True
-            )
-            
-            # -------------------------------
-            # 이상치 시각화 (anomalize 스타일)
-            # -------------------------------
-            st.subheader(f"📊 최근 {anomal_day}일 내 이상치 관측소 시각화")
-            
-            # 최근 이상치가 있는 관측소만 필터링
-            sites_with_recent_anomalies = df_results_filtered[
-                (df_results_filtered["recent_anomaly_flag"]) & 
-                (df_results_filtered["이상상황"] == "수위자료확인필요")
-            ]["관측소명"].tolist()
-            
-            if not sites_with_recent_anomalies:
-                st.info("시각화할 최근 이상치 데이터가 없습니다.")
-            else:
-                # 관측소 선택 옵션 (세션 상태로 선택 유지)
-                # sites_with_recent_anomalies 가 비었으면 위에서 이미 처리되므로 여기서는 비어있지 않음 가정
-                if 'selected_station' not in st.session_state or st.session_state['selected_station'] not in sites_with_recent_anomalies:
-                    # 세션 상태에 값이 없거나 현재 목록에 없는 값이면 첫 항목으로 초기화
-                    st.session_state['selected_station'] = sites_with_recent_anomalies[0]
-
-                selected_station = st.selectbox(
-                    "관측소 선택",
-                    options=sites_with_recent_anomalies,
-                    key='selected_station'
-                )
-                
-                if selected_station in df2_anomal:
-                    plot_data = df2_anomal[selected_station].copy()
-                    
-                    # Plotly 그래프 생성 (anomalize 스타일)
-                    fig = go.Figure()
-                    
-                    # 정상 범위 음영 (3σ)
-                    fig.add_trace(go.Scatter(
-                        x=plot_data['valuedatetimech'],
-                        y=plot_data['recomposed_u3'],
-                        mode='lines',
-                        line=dict(color='rgba(200, 200, 200, 0)'),
-                        showlegend=False,
-                        hoverinfo='skip'
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=plot_data['valuedatetimech'],
-                        y=plot_data['recomposed_l3'],
-                        mode='lines',
-                        line=dict(color='rgba(200, 200, 200, 0)'),
-                        fill='tonexty',
-                        fillcolor='rgba(200, 200, 200, 0.1)',
-                        name='정상 범위 (±3σ)',
-                        hoverinfo='skip'
-                    ))
-                    
-                    # 2σ 범위
-                    fig.add_trace(go.Scatter(
-                        x=plot_data['valuedatetimech'],
-                        y=plot_data['recomposed_u2'],
-                        mode='lines',
-                        line=dict(color='rgba(150, 150, 150, 0)'),
-                        showlegend=False,
-                        hoverinfo='skip'
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=plot_data['valuedatetimech'],
-                        y=plot_data['recomposed_l2'],
-                        mode='lines',
-                        line=dict(color='rgba(150, 150, 150, 0)'),
-                        fill='tonexty',
-                        fillcolor='rgba(150, 150, 150, 0.1)',
-                        name='경고 범위 (±2σ)',
-                        hoverinfo='skip'
-                    ))
-                    
-                    # 관측값 (정상)
-                    normal_data = plot_data[plot_data['anomaly'] == 'No']
-                    fig.add_trace(go.Scatter(
-                        x=normal_data['valuedatetimech'],
-                        y=normal_data['observed'],
-                        mode='lines+markers',
-                        line=dict(color='steelblue', width=2),
-                        marker=dict(size=5),
-                        name='관측값 (정상)'
-                    ))
-                    
-                    # 이상치 (과거)
-                    anomaly_data = plot_data[(plot_data['anomaly'] == 'Yes') & 
-                                            (plot_data['valuedatetimech'] < recent_cut)]
-                    if not anomaly_data.empty:
-                        fig.add_trace(go.Scatter(
-                            x=anomaly_data['valuedatetimech'],
-                            y=anomaly_data['observed'],
-                            mode='markers',
-                            marker=dict(color='orange', size=12, symbol='x', line=dict(width=2)),
-                            name='과거 이상치'
-                        ))
-                    
-                    # 이상치 (최근)
-                    recent_anomaly_data = plot_data[(plot_data['anomaly'] == 'Yes') & 
-                                                   (plot_data['valuedatetimech'] >= recent_cut)]
-                    if not recent_anomaly_data.empty:
-                        fig.add_trace(go.Scatter(
-                            x=recent_anomaly_data['valuedatetimech'],
-                            y=recent_anomaly_data['observed'],
-                            mode='markers',
-                            marker=dict(color='red', size=15, symbol='diamond', line=dict(width=2, color='darkred')),
-                            name=f'최근 {anomal_day}일 이상치'
-                        ))
-                    
-                    # 추세선 (시계열 분해 사용 시)
-                    if use_decomposition and 'trend' in plot_data.columns:
-                        fig.add_trace(go.Scatter(
-                            x=plot_data['valuedatetimech'],
-                            y=plot_data['trend'] + plot_data['seasonal'],
-                            mode='lines',
-                            line=dict(color='green', dash='dash', width=2),
-                            name='추세 + 계절성'
-                        ))
-                    
-                    # 최근 N일 구간 강조
-                    fig.add_vrect(
-                        x0=recent_cut,
-                        x1=date.today(),
-                        fillcolor="rgba(255, 0, 0, 0.05)",
-                        layer="below",
-                        line_width=0,
-                        annotation_text=f"최근 {anomal_day}일",
-                        annotation_position="top left"
-                    )
-                    
-                    fig.update_layout(
-                        title=f"🌊 {selected_station} 지하수위 시계열 (anomalize 방식 이상치 탐지)",
-                        xaxis_title="날짜",
-                        yaxis_title="지하수위 (m)",
-                        height=600,
-                        hovermode="x unified",
-                        legend=dict(
-                            orientation="h",
-                            yanchor="bottom",
-                            y=1.02,
-                            xanchor="right",
-                            x=1
-                        )
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # 상세 통계 정보
-                    info_row = df_results_filtered[df_results_filtered["관측소명"] == selected_station].iloc[0]
-                    
-                    st.subheader("📊 통계 정보")
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("평균 수위", f"{info_row['평균수위']:.2f} m")
-                    with col2:
-                        st.metric("표준편차", f"{info_row['표준편차']:.2f} m")
-                    with col3:
-                        st.metric("전체 이상치", f"{info_row['이상치개수']}개")
-                    with col4:
-                        st.metric("최근 이상치", f"{info_row['최근이상치개수']}개")
-                    
-                    st.write(f"**이상치 발생 날짜:** {info_row['anomaly_dates']}")
-                    
-                    # 시계열 분해 결과 (사용 시)
-                    if use_decomposition and all(col in plot_data.columns for col in ['trend', 'seasonal', 'remainder']):
-                        with st.expander("📈 시계열 분해 결과 (Time Decomposition)"):
-                            fig_decomp = go.Figure()
-                            
-                            # 서브플롯 생성
-                            from plotly.subplots import make_subplots
-                            
-                            fig_decomp = make_subplots(
-                                rows=4, cols=1,
-                                subplot_titles=('원본 관측값 (Observed)', '추세 (Trend)', 
-                                              '계절성 (Seasonal)', '잔차 (Remainder)'),
-                                vertical_spacing=0.08
-                            )
-                            
-                            # 원본
-                            fig_decomp.add_trace(
-                                go.Scatter(x=plot_data['valuedatetimech'], y=plot_data['observed'],
-                                          mode='lines', name='Observed', line=dict(color='steelblue')),
-                                row=1, col=1
-                            )
-                            
-                            # 추세
-                            fig_decomp.add_trace(
-                                go.Scatter(x=plot_data['valuedatetimech'], y=plot_data['trend'],
-                                          mode='lines', name='Trend', line=dict(color='green')),
-                                row=2, col=1
-                            )
-                            
-                            # 계절성
-                            fig_decomp.add_trace(
-                                go.Scatter(x=plot_data['valuedatetimech'], y=plot_data['seasonal'],
-                                          mode='lines', name='Seasonal', line=dict(color='orange')),
-                                row=3, col=1
-                            )
-                            
-                            # 잔차 (이상치 표시)
-                            remainder_normal = plot_data[plot_data['anomaly'] == 'No']
-                            remainder_anomaly = plot_data[plot_data['anomaly'] == 'Yes']
-                            
-                            fig_decomp.add_trace(
-                                go.Scatter(x=remainder_normal['valuedatetimech'], y=remainder_normal['remainder'],
-                                          mode='lines', name='Remainder', line=dict(color='purple')),
-                                row=4, col=1
-                            )
-                            
-                            if not remainder_anomaly.empty:
-                                fig_decomp.add_trace(
-                                    go.Scatter(x=remainder_anomaly['valuedatetimech'], y=remainder_anomaly['remainder'],
-                                              mode='markers', name='Anomaly', 
-                                              marker=dict(color='red', size=10, symbol='diamond')),
-                                    row=4, col=1
-                                )
-                            
-                            fig_decomp.update_xaxes(title_text="날짜", row=4, col=1)
-                            fig_decomp.update_yaxes(title_text="수위 (m)", row=1, col=1)
-                            fig_decomp.update_yaxes(title_text="수위 (m)", row=2, col=1)
-                            fig_decomp.update_yaxes(title_text="수위 (m)", row=3, col=1)
-                            fig_decomp.update_yaxes(title_text="수위 (m)", row=4, col=1)
-                            
-                            fig_decomp.update_layout(
-                                height=800,
-                                showlegend=False,
-                                title_text=f"{selected_station} 시계열 분해 분석"
-                            )
-                            
-                            st.plotly_chart(fig_decomp, use_container_width=True)
-                    
-                    # 데이터 테이블
-                    with st.expander("📄 전체 데이터 보기"):
-                        display_columns = ['valuedatetimech', 'gw_level_daily', 'anomaly']
-                        if use_decomposition:
-                            display_columns.extend(['trend', 'seasonal', 'remainder', 'observed'])
-                        
-                        st.dataframe(
-                            plot_data[display_columns].style.format({
-                                'gw_level_daily': '{:.3f}',
-                                'trend': '{:.3f}',
-                                'seasonal': '{:.3f}',
-                                'remainder': '{:.3f}',
-                                'observed': '{:.3f}'
-                            }, na_rep='-'),
-                            use_container_width=True
-                        )
-                    
-                    # 이상치 상세 정보
-                    with st.expander("⚠️ 이상치 상세 정보"):
-                        anomaly_details = plot_data[plot_data['anomaly'] == 'Yes'][
-                            ['valuedatetimech', 'gw_level_daily', 'observed']
-                        ].copy()
-                        
-                        if not anomaly_details.empty:
-                            anomaly_details['최근여부'] = anomaly_details['valuedatetimech'].apply(
-                                lambda x: '최근' if x >= recent_cut else '과거'
-                            )
-                            anomaly_details = anomaly_details.rename(columns={
-                                'valuedatetimech': '날짜',
-                                'gw_level_daily': '지하수위',
-                                'observed': '관측값'
-                            })
-                            
-                            st.dataframe(
-                                anomaly_details.style.format({
-                                    '지하수위': '{:.3f}',
-                                    '관측값': '{:.3f}'
-                                }),
-                                use_container_width=True
-                            )
-                        else:
-                            st.info("이상치가 없습니다.")
-    
+        # 세션 상태에 저장
+        st.session_state.df2_anomal = df2_anomal
+        st.session_state.df_results_filtered = df_results_filtered
+        st.session_state.analysis_complete = True
+        
     except Exception as e:
         st.error(f"오류 발생: {str(e)}")
         import traceback
         st.code(traceback.format_exc())
 
-else:
-    st.info("👈 왼쪽 사이드바에서 설정을 조정한 후 '이상값 검출 시작' 버튼을 클릭하세요.")
+# -------------------------------
+# 결과 표시 (세션 상태에서 불러오기)
+# -------------------------------
+if st.session_state.analysis_complete:
+    df_results_filtered = st.session_state.df_results_filtered
+    df2_anomal = st.session_state.df2_anomal
+    anomal_day = st.session_state.anomal_day
+    recent_cut = st.session_state.recent_cut
+    use_decomposition = st.session_state.use_decomposition
+    station_list = st.session_state.station_list
+    
+    # -------------------------------
+    # 결과 요약 표시
+    # -------------------------------
+    st.subheader(f"🔎 최근 {anomal_day}일 내 이상치 / 미수신 관측소 요약")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("총 관측소 수", len(station_list))
+    with col2:
+        anomaly_count = df_results_filtered[df_results_filtered["이상상황"] == "수위자료확인필요"].shape[0]
+        st.metric("이상치 관측소", anomaly_count)
+    with col3:
+        missing_count = df_results_filtered[df_results_filtered["이상상황"] == "미수신"].shape[0]
+        st.metric("미수신 관측소", missing_count)
+
+    if df_results_filtered.empty:
+        st.success(f"✅ 최근 {anomal_day}일 내 이상치 또는 미수신 관측소가 없습니다.")
+    else:
+        # 결과 테이블 표시
+        display_cols = ["관측소명", "이상상황", "해발수위", "평균수위", "표준편차", "이상치개수", "최근이상치개수", "anomaly_dates"]
+        st.dataframe(
+            df_results_filtered[display_cols].reset_index(drop=True).style.format({
+                "해발수위": "{:.2f}",
+                "평균수위": "{:.2f}",
+                "표준편차": "{:.2f}"
+            }, na_rep="-"),
+            use_container_width=True
+        )
+        
+        # -------------------------------
+        # 이상치 시각화 (anomalize 스타일)
+        # -------------------------------
+        st.subheader(f"📊 최근 {anomal_day}일 내 이상치 관측소 시각화")
+        
+        # 최근 이상치가 있는 관측소만 필터링
+        sites_with_recent_anomalies = df_results_filtered[
+            (df_results_filtered["recent_anomaly_flag"]) & 
+            (df_results_filtered["이상상황"] == "수위자료확인필요")
+        ]["관측소명"].tolist()
+        
+        if not sites_with_recent_anomalies:
+            st.info("시각화할 최근 이상치 데이터가 없습니다.")
+        else:
+            # 관측소 선택 옵션
+            selected_station = st.selectbox(
+                "관측소 선택",
+                options=sites_with_recent_anomalies,
+                index=0,
+                key="station_selector"
+            )
+            
+            if selected_station in df2_anomal:
+                plot_data = df2_anomal[selected_station].copy()
+                
+                # Plotly 그래프 생성 (anomalize 스타일)
+                fig = go.Figure()
+                
+                # 정상 범위 음영 (3σ)
+                fig.add_trace(go.Scatter(
+                    x=plot_data['valuedatetimech'],
+                    y=plot_data['recomposed_u3'],
+                    mode='lines',
+                    line=dict(color='rgba(200, 200, 200, 0)'),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=plot_data['valuedatetimech'],
+                    y=plot_data['recomposed_l3'],
+                    mode='lines',
+                    line=dict(color='rgba(200, 200, 200, 0)'),
+                    fill='tonexty',
+                    fillcolor='rgba(200, 200, 200, 0.1)',
+                    name='정상 범위 (±3σ)',
+                    hoverinfo='skip'
+                ))
+                
+                # 2σ 범위
+                fig.add_trace(go.Scatter(
+                    x=plot_data['valuedatetimech'],
+                    y=plot_data['recomposed_u2'],
+                    mode='lines',
+                    line=dict(color='rgba(150, 150, 150, 0)'),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=plot_data['valuedatetimech'],
+                    y=plot_data['recomposed_l2'],
+                    mode='lines',
+                    line=dict(color='rgba(150, 150, 150, 0)'),
+                    fill='tonexty',
+                    fillcolor='rgba(150, 150, 150, 0.1)',
+                    name='경고 범위 (±2σ)',
+                    hoverinfo='skip'
+                ))
+                
+                # 관측값 (정상)
+                normal_data = plot_data[plot_data['anomaly'] == 'No']
+                fig.add_trace(go.Scatter(
+                    x=normal_data['valuedatetimech'],
+                    y=normal_data['observed'],
+                    mode='lines+markers',
+                    line=dict(color='steelblue', width=2),
+                    marker=dict(size=5),
+                    name='관측값 (정상)'
+                ))
+                
+                # 이상치 (과거)
+                anomaly_data = plot_data[(plot_data['anomaly'] == 'Yes') & 
+                                        (plot_data['valuedatetimech'] < recent_cut)]
+                if not anomaly_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=anomaly_data['valuedatetimech'],
+                        y=anomaly_data['observed'],
+                        mode='markers',
+                        marker=dict(color='orange', size=12, symbol='x', line=dict(width=2)),
+                        name='과거 이상치'
+                    ))
+                
+                # 이상치 (최근)
+                recent_anomaly_data = plot_data[(plot_data['anomaly'] == 'Yes') & 
+                                               (plot_data['valuedatetimech'] >= recent_cut)]
+                if not recent_anomaly_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=recent_anomaly_data['valuedatetimech'],
+                        y=recent_anomaly_data['observed'],
+                        mode='markers',
+                        marker=dict(color='red', size=15, symbol='diamond', line=dict(width=2, color='darkred')),
+                        name=f'최근 {anomal_day}일 이상치'
+                    ))
+                
+                # 추세선 (시계열 분해 사용 시)
+                if use_decomposition and 'trend' in plot_data.columns:
+                    fig.add_trace(go.Scatter(
+                        x=plot_data['valuedatetimech'],
+                        y=plot_data['trend'] + plot_data['seasonal'],
+                        mode='lines',
+                        line=dict(color='green', dash='dash', width=2),
+                        name='추세 + 계절성'
+                    ))
+                
+                # 최근 N일 구간 강조
+                fig.add_vrect(
+                    x0=recent_cut,
+                    x1=date.today(),
+                    fillcolor="rgba(255, 0, 0, 0.05)",
+                    layer="below",
+                    line_width=0,
+                    annotation_text=f"최근 {anomal_day}일",
+                    annotation_position="top left"
+                )
+                
+                fig.update_layout(
+                    title=f"🌊 {selected_station} 지하수위 시계열 (anomalize 방식 이상치 탐지)",
+                    xaxis_title="날짜",
+                    yaxis_title="지하수위 (m)",
+                    height=600,
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # 상세 통계 정보
+                info_row = df_results_filtered[df_results_filtered["관측소명"] == selected_station].iloc[0]
+                
+                st.subheader("📊 통계 정보")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("평균 수위", f"{info_row['평균수위']:.2f} m")
+                with col2:
+                    st.metric("표준편차", f"{info_row['표준편차']:.2f} m")
+                with col3:
+                    st.metric("전체 이상치", f"{info_row['이상치개수']}개")
+                with col4:
+                    st.metric("최근 이상치", f"{info_row['최근이상치개수']}개")
+                
+                st.write(f"**이상치 발생 날짜:** {info_row['anomaly_dates']}")
+                
+                # 시계열 분해 결과 (사용 시)
+                if use_decomposition and all(col in plot_data.columns for col in ['trend', 'seasonal', 'remainder']):
+                    with st.expander("📈 시계열 분해 결과 (Time Decomposition)"):
+                        from plotly.subplots import make_subplots
+                        
+                        fig_decomp = make_subplots(
+                            rows=4, cols=1,
+                            subplot_titles=('원본 관측값 (Observed)', '추세 (Trend)', 
+                                          '계절성 (Seasonal)', '잔차 (Remainder)'),
+                            vertical_spacing=0.08
+                        )
+                        
+                        # 원본
+                        fig_decomp.add_trace(
+                            go.Scatter(x=plot_data['valuedatetimech'], y=plot_data['observed'],
+                                      mode='lines', name='Observed', line=dict(color='steelblue')),
+                            row=1, col=1
+                        )
+                        
+                        # 추세
+                        fig_decomp.add_trace(
+                            go.Scatter(x=plot_data['valuedatetimech'], y=plot_data['trend'],
+                                      mode='lines', name='Trend', line=dict(color='green')),
+                            row=2, col=1
+                        )
+                        
+                        # 계절성
+                        fig_decomp.add_trace(
+                            go.Scatter(x=plot_data['valuedatetimech'], y=plot_data['seasonal'],
+                                      mode='lines', name='Seasonal', line=dict(color='orange')),
+                            row=3, col=1
+                        )
+                        
+                        # 잔차 (이상치 표시)
+                        remainder_normal = plot_data[plot_data['anomaly'] == 'No']
+                        remainder_anomaly = plot_data[plot_data['anomaly'] == 'Yes']
+                        
+                        fig_decomp.add_trace(
+                            go.Scatter(x=remainder_normal['valuedatetimech'], y=remainder_normal['remainder'],
+                                      mode='lines', name='Remainder', line=dict(color='purple')),
+                            row=4, col=1
+                        )
+                        
+                        if not remainder_anomaly.empty:
+                            fig_decomp.add_trace(
+                                go.Scatter(x=remainder_anomaly['valuedatetimech'], y=remainder_anomaly['remainder'],
+                                          mode='markers', name='Anomaly', 
+                                          marker=dict(color='red', size=10, symbol='diamond')),
+                                row=4, col=1
+                            )
+                        
+                        fig_decomp.update_xaxes(title_text="날짜", row=4, col=1)
+                        fig_decomp.update_yaxes(title_text="수위 (m)", row=1, col=1)
+                        fig_decomp.update_yaxes(title_text="수위 (m)", row=2, col=1)
+                        fig_decomp.update_yaxes(title_text="수위 (m)", row=3, col=1)
+                        fig_decomp.update_yaxes(title_text="수위 (m)", row=4, col=1)
+                        
+                        fig_decomp.update_layout(
+                            height=800,
+                            showlegend=False,
+                            title_text=f"{selected_station} 시계열 분해 분석"
+                        )
+                        
+                        st.plotly_chart(fig_decomp, use_container_width=True)
+                
+                # 데이터 테이블
+                with st.expander("📄 전체 데이터 보기"):
+                    display_columns = ['valuedatetimech', 'gw_level_daily', 'anomaly']
+                    if use_decomposition:
+                        display_columns.extend(['trend', 'seasonal', 'remainder', 'observed'])
+                    
+                    st.dataframe(
+                        plot_data[display_columns].style.format({
+                            'gw_level_daily': '{:.3f}',
+                            'trend': '{:.3f}',
+                            'seasonal': '{:.3f}',
+                            'remainder': '{:.3f}',
+                            'observed': '{:.3f}'
+                        }, na_rep='-'),
+                        use_container_width=True
+                    )
+                
+                # 이상치 상세 정보
+                with st.expander("⚠️ 이상치 상세 정보"):
+                    anomaly_details = plot_data[plot_data['anomaly'] == 'Yes'][
+                        ['valuedatetimech', 'gw_level_daily', 'observed']
+                    ].copy()
+                    
+                    if not anomaly_details.empty:
+                        anomaly_details['최근여부'] = anomaly_details['valuedatetimech'].apply(
+                            lambda x: '최근' if x >= recent_cut else '과거'
+                        )
+                        anomaly_details = anomaly_details.rename(columns={
+                            'valuedatetimech': '날짜',
+                            'gw_level_daily': '지하수위',
+                            'observed': '관측값'
+                        })
+                        
+                        st.dataframe(
+                            anomaly_details.style.format({
+                                '지하수위': '{:.3f}',
+                                '관측값': '{:.3f}'
+                            }),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("이상치가 없습니다.")
+
+elif not run_button:
+    st.info("👈 핸드폰에서는 좌측상단의 >>을 누르고 이상값 검출 시작 버튼을 클릭하세요")
     st.markdown("""
     ### 사용 방법
     1. **최대 이상치 비율**: 전체 데이터 중 이상치로 간주할 최대 비율 설정
