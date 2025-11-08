@@ -1,9 +1,9 @@
-streamlit>=1.30.0
-pandas>=2.1.0
-numpy>=1.26.0
-requests>=2.31.0
-beautifulsoup4>=4.12.2
-scipy>=1.11.0
-statsmodels>=1.2.0
-plotly>=5.20.0
-tqdm>=4.66.0
+streamlit>=1.51.0          # 3.13과 호환되는 최신 1.x 버전
+pandas>=2.3.0              # Python 3.13에서 설치 가능한 버전
+numpy>=2.3.0               # Python 3.13 호환 최신 버전
+requests>=2.32.0           # 최신 버전 호환
+beautifulsoup4>=4.14.0     # 최신 버전 호환
+scipy>=1.16.0              # Python 3.13에서 설치 가능
+statsmodels==0.14.5        # Python 3.13에서 설치 가능한 최신 버전
+plotly>=5.20.0             # Python 3.13 호환
+tqdm>=4.66.0               # 호환 문제 없음
