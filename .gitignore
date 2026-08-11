@@ -1,0 +1,26 @@
+# 앱이 읽지 않는 원본/백업 데이터
+input/df2_원본.csv
+input/*_원본.csv
+input/*_backup.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit — 비밀정보는 절대 커밋하지 않음
+.streamlit/secrets.toml
+
+# 에디터 / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 임시 파일
+*.log
+*.tmp

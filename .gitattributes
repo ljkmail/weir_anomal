@@ -1,0 +1,18 @@
+# 텍스트 파일은 저장소에 LF로 정규화하고, 체크아웃 시 OS 기본 줄바꿈으로 변환
+* text=auto
+
+# 대용량 데이터 파일은 변환하지 않음
+# (이미 CRLF로 커밋되어 있어 정규화하면 파일 전체가 재작성됨)
+*.csv -text
+
+# 바이너리 — 줄바꿈 변환 및 diff 금지
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.zip  binary
+*.xlsx binary
+*.xls  binary
+*.hwp  binary
+*.hwpx binary
