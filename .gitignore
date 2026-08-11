@@ -14,9 +14,10 @@ env/
 # Streamlit — 비밀정보는 절대 커밋하지 않음
 .streamlit/secrets.toml
 
-# 에디터 / OS
+# 에디터 / OS / 도구 설정
 .vscode/
 .idea/
+.claude/
 Thumbs.db
 desktop.ini
 .DS_Store

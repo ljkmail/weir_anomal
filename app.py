@@ -12,6 +12,7 @@ from math import floor
 import re
 from requests.adapters import HTTPAdapter, Retry
 import warnings
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo('Asia/Seoul')
@@ -119,8 +120,12 @@ def time_recompose(df, anomaly_indices):
     return df
 
 # 데이터 로드
+# cwd가 아니라 app.py 위치를 기준으로 잡는다. 다른 디렉터리에서 실행해도 동작해야 한다.
+LOCAL_DF2_PATH = Path(__file__).resolve().parent / "input" / "df2.csv"
+
+
 @st.cache_data(show_spinner=False)
-def load_local_df2(path="./input/df2.csv"):
+def load_local_df2(path=LOCAL_DF2_PATH):
     df = pd.read_csv(path)
     if "V1" in df.columns:
         df = df.drop(columns=["V1"])
@@ -157,10 +162,23 @@ def detect_gennum_col(df):
     return None
 
 # 크롤링
-def create_retry_session(retries=3, backoff_factor=0.5):
+# 지하수위 datatype. 응답에는 02~05(하천수위/강우/수온)도 함께 오지만 사용하지 않는다.
+GW_LEVEL_DATATYPE = "01"
+# 관측소당 1일치 원자료의 대략적인 응답 크기(MB). 소요시간 안내용 추정치.
+MB_PER_STATION_DAY = 0.0166
+
+
+def create_retry_session(retries=3, backoff_factor=0.5, pool_size=32):
     session = requests.Session()
-    retry = Retry(total=retries, backoff_factor=backoff_factor, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET"]),
+    )
+    # 기본 pool_maxsize는 10이라 동시 요청 수를 그 이상으로 올리면 커넥션을
+    # 버리고 다시 맺는 낭비가 생긴다. 워커 수에 맞춰 풀을 키운다.
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool_size, pool_maxsize=pool_size)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
@@ -178,23 +196,70 @@ def crawl_station_list(url_weir):
         ids.update(pattern.findall(soup.get_text(" ", strip=True)))
     return sorted(ids)
 
-def fetch_station_json(gennum, from_date, to_date, session=None):
+def fetch_station_daily(gennum, from_date, to_date, session):
+    """관측소 1개소를 받아 작업 스레드 안에서 일평균까지 집계해 반환한다.
+
+    원자료는 8개월 기준 약 2.8만 레코드(3.9MB)지만 필요한 것은 일평균 240여 행뿐이다.
+    여기서 미리 줄여 두면 메인 스레드의 concat/pivot 부담이 100분의 1로 줄고,
+    집계 자체도 워커에 분산된다.
+    """
     url = "http://www.gims.go.kr/odmUndergroundChartJson"
     params = {"resultId": gennum, "fromDate": from_date, "toDate": to_date}
-    sess = session or create_retry_session()
-    try:
-        resp = sess.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-        js = resp.json()
-        if not isinstance(js, dict) or "list" not in js or not js["list"]:
-            return None
-        df_temp = pd.DataFrame(js["list"])
-        date_col = "valuedatetimech" if "valuedatetimech" in df_temp.columns else "valuedatetime"
-        df_temp["valuedatetimech"] = pd.to_datetime(df_temp[date_col], errors="coerce")
-        df_temp["gennum"] = gennum
-        return df_temp
-    except:
+    # (연결 타임아웃, 읽기 타임아웃) — 큰 응답을 받으므로 읽기 쪽을 넉넉히 준다.
+    resp = session.get(url, params=params, timeout=(5, 60))
+    resp.raise_for_status()
+    rows = resp.json().get("list")
+    if not rows:
         return None
+
+    # 필요한 3개 컬럼만 만든다 (valueid/resultid/valuedatetime/type은 버림)
+    df_temp = pd.DataFrame(rows, columns=["datatype", "datavalue", "valuedatetimech"])
+    df_temp = df_temp[df_temp["datatype"] == GW_LEVEL_DATATYPE]
+    if df_temp.empty:
+        return None
+
+    # 포맷을 명시하면 2.8만 행 파싱이 추론 방식보다 훨씬 빠르다.
+    df_temp["valuedatetimech"] = pd.to_datetime(
+        df_temp["valuedatetimech"], format="%Y-%m-%d-%H-%M", errors="coerce"
+    ).dt.date
+    df_temp["datavalue"] = pd.to_numeric(df_temp["datavalue"], errors="coerce")
+    df_temp = df_temp.dropna(subset=["valuedatetimech", "datavalue"])
+    if df_temp.empty:
+        return None
+
+    daily = df_temp.groupby("valuedatetimech", as_index=False)["datavalue"].mean()
+    daily = daily.rename(columns={"datavalue": "gw_level_daily"})
+    daily["gennum"] = gennum
+    return daily[["gennum", "valuedatetimech", "gw_level_daily"]]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_new_daily(stations, from_date, to_date, workers):
+    """관측소 목록을 병렬로 수집해 일평균 자료 하나로 합친다.
+
+    같은 (관측소, 기간) 조합은 30분간 캐시되므로 버튼을 다시 눌러도 재수집하지 않는다.
+
+    주의: 이 함수 안에서는 st.* 요소를 호출하면 안 된다. 캐시 적중 시 Streamlit이
+    기록된 요소 호출을 재생하려 하는데 그 시점에는 대상 블록이 사라져
+    CacheReplayClosureError가 난다. 진행 표시는 호출하는 쪽에서 처리한다.
+    """
+    session = create_retry_session(pool_size=max(workers, 10))
+    frames, failed = [], []
+    with session:
+        with ThreadPoolExecutor(max_workers=workers) as exe:
+            futures = {exe.submit(fetch_station_daily, s, from_date, to_date, session): s
+                       for s in stations}
+            for i, fut in enumerate(as_completed(futures), 1):
+                try:
+                    daily = fut.result()
+                    if daily is not None and not daily.empty:
+                        frames.append(daily)
+                except Exception as e:
+                    # 조용히 넘기면 '미수신'으로 오인되므로 사유를 남긴다.
+                    failed.append(f"{futures[fut]} ({type(e).__name__})")
+
+    empty = pd.DataFrame(columns=["gennum", "valuedatetimech", "gw_level_daily"])
+    return (pd.concat(frames, ignore_index=True) if frames else empty), failed
 
 # 메인 실행
 if run_button:
@@ -223,40 +288,27 @@ if run_button:
         last_local_date = pd.to_datetime(df2["valuedatetimech"]).dt.date.max()
         from_date, to_date = last_local_date.isoformat(), get_korea_today().isoformat()
         
-        st.info(f"새 관측자료 수집 중... ({from_date} ~ {to_date})")
-        progress_bar = st.progress(0)
-        fetched_frames = []
-        
-        with requests.Session() as session:
-            with ThreadPoolExecutor(max_workers=max_workers) as exe:
-                futures = {exe.submit(fetch_station_json, s, from_date, to_date, session): s for s in station_list}
-                for i, fut in enumerate(as_completed(futures), 1):
-                    progress_bar.progress(i / len(station_list))
-                    try:
-                        df_temp = fut.result()
-                        if df_temp is not None and not df_temp.empty:
-                            fetched_frames.append(df_temp)
-                    except:
-                        pass
-        
-        st.write(f"수집 완료: {len(fetched_frames)}개")
-        
-        if fetched_frames:
-            df_new = pd.concat(fetched_frames, ignore_index=True)
-            df_new_pivot = df_new.pivot_table(index=["gennum", "valuedatetimech"], 
-                                              columns="datatype", values="datavalue", aggfunc="mean").reset_index()
-            rename_map = {"01": "gw_level"}
-            df_new_pivot = df_new_pivot.rename(columns=rename_map)
-            df_new_pivot["valuedatetimech"] = pd.to_datetime(df_new_pivot["valuedatetimech"], errors="coerce").dt.date
-            
-            if "gw_level" in df_new_pivot.columns:
-                df_url3 = df_new_pivot.groupby(["gennum", "valuedatetimech"], as_index=False)["gw_level"].mean()
-                df_url3 = df_url3.rename(columns={"gw_level": "gw_level_daily"})
-                df_url3 = df_url3[df_url3["valuedatetimech"] > last_local_date]
-                df_url3["gw_level_daily"] = pd.to_numeric(df_url3["gw_level_daily"], errors="coerce")
-                combined = pd.concat([df2, df_url3], ignore_index=True)
-            else:
-                combined = df2.copy()
+        span_days = (get_korea_today() - last_local_date).days
+        if span_days > 30:
+            st.warning(
+                f"로컬 자료(`input/df2.csv`)가 **{last_local_date}** 까지만 있어 매 실행마다 "
+                f"{span_days}일치 × {len(station_list)}개소(총 약 "
+                f"{span_days * len(station_list) * MB_PER_STATION_DAY:.0f}MB)를 새로 내려받습니다. "
+                "CSV를 최신으로 갱신하면 수집 시간이 크게 줄어듭니다."
+            )
+
+        with st.spinner(f"새 관측자료 수집 중... ({from_date} ~ {to_date})"):
+            df_url3, failed = fetch_new_daily(tuple(station_list), from_date, to_date, max_workers)
+
+        st.write(f"수집 완료: {df_url3['gennum'].nunique()}개소 / {len(df_url3):,}일치")
+        if failed:
+            with st.expander(f"⚠️ 수집 실패 {len(failed)}개소 — 펼쳐서 확인"):
+                st.write(", ".join(failed))
+
+        # fetch_new_daily가 이미 일평균까지 집계해 두므로 여기서는 이어붙이기만 한다.
+        if not df_url3.empty:
+            df_url3 = df_url3[df_url3["valuedatetimech"] > last_local_date]
+            combined = pd.concat([df2, df_url3], ignore_index=True)
         else:
             combined = df2.copy()
         
@@ -267,12 +319,15 @@ if run_button:
         st.session_state.update({'recent_cut': recent_cut, 'anomal_day': anomal_day, 'use_decomposition': use_decomposition})
         
         pbar = st.progress(0)
-        for idx, site in enumerate(combined["gennum"].unique(), 1):
-            pbar.progress(idx / len(combined["gennum"].unique()))
-            
-            df_temp = combined[combined["gennum"] == site].dropna(subset=["gw_level_daily"])
+        # groupby로 한 번에 쪼갠다. 관측소마다 combined 전체를 마스킹하면
+        # 20만 행 × 53회를 훑게 되고, unique()도 매 반복 다시 계산됐다.
+        groups = list(combined.groupby("gennum", sort=False))
+        for idx, (site, df_site) in enumerate(groups, 1):
+            pbar.progress(idx / len(groups))
+
+            df_temp = df_site.dropna(subset=["gw_level_daily"])
             df_temp = df_temp.sort_values("valuedatetimech").reset_index(drop=True).copy()
-            
+
             if len(df_temp) < 6:
                 continue
             
@@ -389,7 +444,7 @@ if st.session_state.analysis_complete:
                 "평균수위": "{:.2f}",
                 "표준편차": "{:.2f}"
             }, na_rep="-"),
-            use_container_width=True
+            width="stretch"
         )
         
         # 시각화
@@ -452,7 +507,7 @@ if st.session_state.analysis_complete:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
                 
                 # 통계 정보
                 info = df_results_filtered[df_results_filtered["관측소명"] == selected_station].iloc[0]
