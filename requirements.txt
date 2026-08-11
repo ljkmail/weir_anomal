@@ -1,9 +1,10 @@
-streamlit>=1.51.0          # 3.13과 호환되는 최신 1.x 버전
-pandas>=2.3.0              # Python 3.13에서 설치 가능한 버전
-numpy>=2.3.0               # Python 3.13 호환 최신 버전
-requests>=2.32.0           # 최신 버전 호환
-beautifulsoup4>=4.14.0     # 최신 버전 호환
-scipy>=1.16.0              # Python 3.13에서 설치 가능
+streamlit>=1.51.0,<2       # 3.13과 호환되는 최신 1.x 버전
+pandas>=2.3.0,<3           # 3.x는 API 변경이 있어 상한 고정
+numpy>=2.3.0,<3            # Python 3.13 호환 최신 버전
+requests>=2.32.0,<3        # 최신 버전 호환
+beautifulsoup4>=4.13.0,<5  # 최신 버전 호환
+scipy>=1.16.0,<2           # Python 3.13에서 설치 가능
 statsmodels==0.14.5        # Python 3.13에서 설치 가능한 최신 버전
-plotly>=5.20.0             # Python 3.13 호환
-tqdm>=4.66.0               # 호환 문제 없음
+plotly>=5.20.0,<7          # Python 3.13 호환 (로컬 검증: 6.3.0)
+tqdm>=4.66.0,<5            # 호환 문제 없음
+tzdata                     # zoneinfo용 tz DB (시스템 tzdata 없는 컨테이너 대비)

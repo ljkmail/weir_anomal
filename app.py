@@ -12,9 +12,9 @@ from math import floor
 import re
 from requests.adapters import HTTPAdapter, Retry
 import warnings
-import pytz
+from zoneinfo import ZoneInfo
 
-KST = pytz.timezone('Asia/Seoul')
+KST = ZoneInfo('Asia/Seoul')
 
 def get_korea_today():
     return datetime.now(KST).date()
